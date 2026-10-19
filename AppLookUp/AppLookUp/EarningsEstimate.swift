@@ -1,0 +1,494 @@
+//
+//  EarningsEstimate.swift
+//  Applookup
+//
+//  v2: monthly earnings for apps you don't own.
+//
+//  The method mirrors the download calibration in CalibrationAnchor.swift:
+//
+//    1. ANCHOR. Your own app's real monthly proceeds in one storefront (from the Earnings tab,
+//       or typed in from App Store Connect), saved with its Top Grossing rank that day.
+//
+//    2. RANK. Grossing charts follow a power law just like download charts. Two anchors at
+//       different ranks fit the curve; one anchor plus the typical decay gives a wider band.
+//       An app outside the top 200 still gets a ceiling: it earns less than whatever #200 does.
+//
+//    3. PER DOWNLOAD. Anchors that also carry their download count give proceeds-per-download
+//       for the category, which multiplies against this app's calibrated download estimate.
+//       Paid apps skip this step — price × 70–85% is the per-download figure.
+//
+//  Where both methods land, they're cross-checked exactly like velocity and rank are.
+//  Everything here is per storefront, in US dollars, as developer proceeds (after Apple's cut).
+//
+
+import Foundation
+
+// MARK: - Exchange rates
+
+enum ExchangeRates {
+
+    private static var cached: (rates: [String: Double], fetchedAt: Date)?
+
+    /// Units of each currency per 1 USD. Keyless public feed, refreshed every six hours.
+    static func perUSD() async -> [String: Double]? {
+        if let cached = Self.cached, Date.now.timeIntervalSince(cached.fetchedAt) < 6 * 3600 {
+            return cached.rates
+        }
+        guard
+            let url = URL(string: "https://open.er-api.com/v6/latest/USD"),
+            let (data, _) = try? await URLSession.shared.data(from: url),
+            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let raw = root["rates"] as? [String: Any]
+        else { return Self.cached?.rates }
+
+        var rates: [String: Double] = [:]
+        for (code, value) in raw {
+            if let number = value as? NSNumber { rates[code.uppercased()] = number.doubleValue }
+        }
+        guard !rates.isEmpty else { return Self.cached?.rates }
+        Self.cached = (rates, .now)
+        return rates
+    }
+}
+
+// MARK: - Anchor
+
+struct RevenueAnchor: Codable, Identifiable, Sendable {
+
+    var id = UUID()
+    var appName: String
+    var trackID: Int
+    var country: String
+    var genreID: Int?
+    /// Actual developer proceeds in this storefront for one month, in USD.
+    var monthlyProceedsUSD: Double
+    /// First-time downloads in this storefront over the same month, if known.
+    var monthlyDownloads: Double?
+    /// Top Grossing positions on the day the anchor was saved.
+    var overallGrossingRank: Int?
+    var categoryGrossingRank: Int?
+    var recordedAt = Date()
+
+    var proceedsPerDownload: Double? {
+        guard let monthlyDownloads, monthlyDownloads > 0, monthlyProceedsUSD > 0 else { return nil }
+        return monthlyProceedsUSD / monthlyDownloads
+    }
+}
+
+struct PerDownloadRate: Sendable {
+    let median: Double
+    let lowest: Double
+    let highest: Double
+    let sampleCount: Int
+    let isExactMatch: Bool
+}
+
+// MARK: - Store
+
+@Observable
+@MainActor
+final class RevenueModel {
+
+    static let shared = RevenueModel()
+
+    private(set) var anchors: [RevenueAnchor] = []
+    private(set) var rates: [String: Double]?
+
+    private let defaults = UserDefaults.standard
+    private let storageKey = "revenue.anchors"
+
+    private init() {
+        if let data = defaults.data(forKey: storageKey) {
+            anchors = (try? JSONDecoder().decode([RevenueAnchor].self, from: data)) ?? []
+        }
+    }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(anchors) {
+            defaults.set(data, forKey: storageKey)
+        }
+    }
+
+    // MARK: Rates
+
+    func refreshRates() async {
+        if let fresh = await ExchangeRates.perUSD() { rates = fresh }
+    }
+
+    func toUSD(_ amount: Double, currency: String) -> Double? {
+        let code = currency.uppercased()
+        if code == "USD" || amount == 0 { return amount }
+        guard let rate = rates?[code], rate > 0 else { return nil }
+        return amount / rate
+    }
+
+    /// Sums a per-currency dictionary. Nil if any non-zero amount can't be converted — a
+    /// total that silently drops a currency would be wrong in a way nobody would notice.
+    func toUSD(_ amounts: [String: Double]) -> Double? {
+        var total = 0.0
+        for (currency, amount) in amounts where amount != 0 {
+            guard let converted = toUSD(amount, currency: currency) else { return nil }
+            total += converted
+        }
+        return total
+    }
+
+    // MARK: Anchors
+
+    /// One anchor per app per storefront; saving again replaces the old reading.
+    func addAnchor(_ anchor: RevenueAnchor) {
+        anchors.removeAll { $0.trackID == anchor.trackID && $0.country == anchor.country }
+        anchors.append(anchor)
+        persist()
+    }
+
+    func removeAnchor(_ anchor: RevenueAnchor) {
+        anchors.removeAll { $0.id == anchor.id }
+        persist()
+    }
+
+    func clearAnchors() {
+        anchors = []
+        persist()
+    }
+
+    /// (rank, monthly proceeds) pairs for one grossing chart. Strictly the same storefront:
+    /// #50 in the US and #50 in Pakistan are different orders of magnitude.
+    func rankedPoints(country: String, genreID: Int?) -> [(rank: Int, value: Double)] {
+        anchors.compactMap { anchor -> (rank: Int, value: Double)? in
+            guard anchor.country == country, anchor.monthlyProceedsUSD > 0 else { return nil }
+            if let genreID {
+                guard anchor.genreID == genreID, let rank = anchor.categoryGrossingRank else { return nil }
+                return (rank, anchor.monthlyProceedsUSD)
+            }
+            guard let rank = anchor.overallGrossingRank else { return nil }
+            return (rank, anchor.monthlyProceedsUSD)
+        }
+    }
+
+    /// Prefers anchors from the same category and storefront, widening only if it has to.
+    func proceedsPerDownload(country: String, genreID: Int?) -> PerDownloadRate? {
+        let tiers: [[RevenueAnchor]] = [
+            anchors.filter { $0.country == country && $0.genreID == genreID },
+            anchors.filter { $0.genreID == genreID },
+        ]
+        for (index, tier) in tiers.enumerated() {
+            let values = tier.compactMap(\.proceedsPerDownload).sorted()
+            guard !values.isEmpty else { continue }
+            let median = values.count.isMultiple(of: 2)
+                ? (values[values.count / 2 - 1] + values[values.count / 2]) / 2
+                : values[values.count / 2]
+            return PerDownloadRate(
+                median: median,
+                lowest: values.first!,
+                highest: values.last!,
+                sampleCount: values.count,
+                isExactMatch: index == 0
+            )
+        }
+        // A different category's monetisation is no guide at all, so no final "any anchor" tier.
+        return nil
+    }
+}
+
+// MARK: - Curve
+
+struct PowerLaw: Sendable {
+    let scale: Double
+    let exponent: Double
+    /// Residual standard deviation in log space; zero when there are only two points.
+    let sigma: Double
+    let count: Int
+
+    func value(at rank: Double) -> Double { scale * pow(rank, -exponent) }
+
+    static func fit(_ points: [(rank: Int, value: Double)]) -> PowerLaw? {
+        let usable = points.filter { $0.rank > 0 && $0.value > 0 }
+        guard usable.count >= 2 else { return nil }
+
+        let xs = usable.map { log(Double($0.rank)) }
+        let ys = usable.map { log($0.value) }
+        let n = Double(usable.count)
+        let meanX = xs.reduce(0, +) / n
+        let meanY = ys.reduce(0, +) / n
+
+        var sxx = 0.0
+        var sxy = 0.0
+        for index in usable.indices {
+            sxx += pow(xs[index] - meanX, 2)
+            sxy += (xs[index] - meanX) * (ys[index] - meanY)
+        }
+        guard sxx > 0 else { return nil }
+
+        let slope = sxy / sxx
+        let intercept = meanY - slope * meanX
+
+        var residual = 0.0
+        for index in usable.indices {
+            residual += pow(ys[index] - (intercept + slope * xs[index]), 2)
+        }
+        let sigma = usable.count > 2 ? sqrt(residual / (n - 2)) : 0
+
+        return PowerLaw(scale: exp(intercept), exponent: -slope, sigma: sigma, count: usable.count)
+    }
+}
+
+// MARK: - Estimate
+
+struct RevenueEstimate: Sendable {
+
+    enum Source: Sendable {
+        case grossingRank
+        case perDownload
+        case paidUpfront
+        case agreement
+        case conflict
+        case belowChart
+        case unavailable
+
+        var label: String {
+            switch self {
+            case .grossingRank: "From Top Grossing rank"
+            case .perDownload: "From downloads × earnings per download"
+            case .paidUpfront: "From downloads × price"
+            case .agreement: "Rank and downloads agree"
+            case .conflict: "Rank and downloads disagree"
+            case .belowChart: "Below the Top Grossing 200"
+            case .unavailable: "Not enough to estimate"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .grossingRank: "chart.line.uptrend.xyaxis"
+            case .perDownload: "arrow.down.circle"
+            case .paidUpfront: "tag"
+            case .agreement: "checkmark.seal"
+            case .conflict: "exclamationmark.triangle"
+            case .belowChart: "arrow.down.to.line"
+            case .unavailable: "questionmark.circle"
+            }
+        }
+    }
+
+    /// USD developer proceeds per month in one storefront.
+    let monthly: Double
+    let low: Double
+    let high: Double
+    let source: Source
+    let detail: String
+
+    var hasNumber: Bool { source != .unavailable && monthly > 0 }
+    var isCeilingOnly: Bool { source == .belowChart }
+}
+
+private struct Leg {
+    let mid: Double
+    let low: Double
+    let high: Double
+    let source: RevenueEstimate.Source
+    let note: String
+}
+
+enum RevenueEngine {
+
+    static let conflictThreshold = 2.5
+    /// Typical grossing-chart decay, and the band either side of it for single-anchor scaling.
+    static let assumedExponent = 0.9
+    static let exponentBand = 0.7...1.1
+
+    static func estimate(
+        app: AppStoreApp,
+        country: String,
+        placements: [ChartPlacement],
+        downloads: CalibratedEstimate?,
+        model: RevenueModel
+    ) -> RevenueEstimate {
+
+        let rank = rankSignal(country: country, placements: placements, model: model)
+        let perDownload = downloadLeg(app: app, country: country, downloads: downloads, model: model)
+        let place = Storefront.named(country).name
+
+        switch (rank.leg, perDownload) {
+
+        case let (rankLeg?, downloadLeg?):
+            let divergence = max(rankLeg.mid, downloadLeg.mid) / max(min(rankLeg.mid, downloadLeg.mid), 0.01)
+            let agrees = divergence <= conflictThreshold
+            return RevenueEstimate(
+                monthly: sqrt(rankLeg.mid * downloadLeg.mid),
+                low: min(rankLeg.mid, downloadLeg.mid),
+                high: max(rankLeg.mid, downloadLeg.mid),
+                source: agrees ? .agreement : .conflict,
+                detail: agrees
+                    ? "Both methods land within \(String(format: "%.1f", divergence))× of each other in \(place)."
+                    : "Rank implies \(String(format: "%.1f", divergence))× what downloads do. Usually heavy in-app spending from few users, or paid installs inflating downloads."
+            )
+
+        case let (rankLeg?, nil):
+            return RevenueEstimate(
+                monthly: rankLeg.mid, low: rankLeg.low, high: rankLeg.high,
+                source: rankLeg.source, detail: rankLeg.note
+            )
+
+        case let (nil, downloadLeg?):
+            if let ceiling = rank.ceiling, downloadLeg.mid > ceiling {
+                return RevenueEstimate(
+                    monthly: ceiling, low: min(downloadLeg.low, ceiling), high: ceiling,
+                    source: .belowChart,
+                    detail: "\(downloadLeg.note) Capped at \(formatUSD(ceiling)): it isn't in the Top Grossing 200, and that's roughly what #200 earns."
+                )
+            }
+            return RevenueEstimate(
+                monthly: downloadLeg.mid, low: downloadLeg.low, high: downloadLeg.high,
+                source: downloadLeg.source, detail: downloadLeg.note
+            )
+
+        case (nil, nil):
+            if let ceiling = rank.ceiling {
+                return RevenueEstimate(
+                    monthly: ceiling, low: 0, high: ceiling, source: .belowChart,
+                    detail: "Not in the Top Grossing 200 in \(place). Your anchors put #200 at about \(formatUSD(ceiling)) a month, so it earns less than that here."
+                )
+            }
+            return RevenueEstimate(
+                monthly: 0, low: 0, high: 0, source: .unavailable,
+                detail: missingInputs(app: app, country: country, placements: placements, downloads: downloads, model: model)
+            )
+        }
+    }
+
+    // MARK: Rank
+
+    private static func rankSignal(
+        country: String,
+        placements: [ChartPlacement],
+        model: RevenueModel
+    ) -> (leg: Leg?, ceiling: Double?) {
+
+        // Category chart first: it's where most apps are visible and anchors match best.
+        let grossing = placements
+            .filter { $0.chart == .grossing }
+            .sorted { ($0.genreID == nil ? 1 : 0) < ($1.genreID == nil ? 1 : 0) }
+
+        var ceiling: Double?
+
+        for placement in grossing {
+            let points = model.rankedPoints(country: country, genreID: placement.genreID)
+            guard !points.isEmpty else { continue }
+
+            switch placement.position {
+            case let .ranked(rank):
+                if let leg = curveLeg(at: rank, points: points, scopeName: placement.scopeName) {
+                    return (leg, nil)
+                }
+            case let .outsideTop(depth):
+                if ceiling == nil {
+                    ceiling = curveLeg(at: depth, points: points, scopeName: placement.scopeName)?.mid
+                }
+            case .feedUnavailable:
+                continue
+            }
+        }
+        return (nil, ceiling)
+    }
+
+    private static func curveLeg(at rank: Int, points: [(rank: Int, value: Double)], scopeName: String) -> Leg? {
+        let usable = points.filter { $0.rank > 0 && $0.value > 0 }
+        guard !usable.isEmpty, rank > 0 else { return nil }
+
+        let target = Double(rank)
+        let ranks = Set(usable.map(\.rank))
+
+        if ranks.count >= 2, let fit = PowerLaw.fit(usable), (0.3...2.0).contains(fit.exponent) {
+            let mid = fit.value(at: target)
+            var spread = max(1.4, exp(fit.sigma * 1.5))
+            let inside = Double(ranks.min()!)...Double(ranks.max()!)
+            if !inside.contains(target) { spread *= 1.5 } // extrapolating past the anchors
+            return Leg(
+                mid: mid, low: mid / spread, high: mid * spread, source: .grossingRank,
+                note: "#\(rank) Top Grossing in \(scopeName), on a curve fitted from \(fit.count) of your anchors (decay \(String(format: "%.2f", fit.exponent)))."
+            )
+        }
+
+        // One anchor: scale by typical decay, and let the exponent's plausible range set the band.
+        let nearest = usable.min { abs(log(Double($0.rank) / target)) < abs(log(Double($1.rank) / target)) }!
+        let ratio = Double(nearest.rank) / target
+        let mid = nearest.value * pow(ratio, assumedExponent)
+        let a = nearest.value * pow(ratio, exponentBand.lowerBound)
+        let b = nearest.value * pow(ratio, exponentBand.upperBound)
+        return Leg(
+            mid: mid, low: min(a, b, mid / 1.3), high: max(a, b, mid * 1.3), source: .grossingRank,
+            note: "#\(rank) Top Grossing in \(scopeName), scaled from one anchor at #\(nearest.rank). An anchor at a different rank would fit the real curve and narrow this."
+        )
+    }
+
+    // MARK: Downloads
+
+    private static func downloadLeg(
+        app: AppStoreApp,
+        country: String,
+        downloads: CalibratedEstimate?,
+        model: RevenueModel
+    ) -> Leg? {
+
+        guard let downloads, downloads.daily > 0 else { return nil }
+
+        let monthly = downloads.daily * 30
+        let low = max(downloads.low, 0) * 30
+        let high = max(downloads.high, downloads.daily) * 30
+        let caveat = downloads.isCalibrated ? "" : " Downloads are uncalibrated, so the band is wide."
+        let perMonth = Int(monthly.rounded()).formatted()
+
+        // Paid upfront: the per-download figure is the price, minus Apple's 30% (15% on the
+        // Small Business Program).
+        if let price = app.price, price > 0, let priceUSD = model.toUSD(price, currency: app.currency ?? "USD") {
+            return Leg(
+                mid: monthly * priceUSD * 0.775,
+                low: low * priceUSD * 0.70,
+                high: high * priceUSD * 0.85,
+                source: .paidUpfront,
+                note: "≈\(perMonth) downloads a month × \(app.priceLabel), keeping 70–85% after Apple's commission. Upfront sales only; in-app purchases aren't counted.\(caveat)"
+            )
+        }
+
+        guard let rate = model.proceedsPerDownload(country: country, genreID: app.primaryGenreId) else { return nil }
+        let match = rate.isExactMatch ? "this category and store" : "this category, other stores"
+        return Leg(
+            mid: monthly * rate.median,
+            low: low * rate.lowest,
+            high: high * rate.highest,
+            source: .perDownload,
+            note: "≈\(perMonth) downloads a month × \(formatUSD(rate.median, cents: true)) per download, from \(rate.sampleCount) anchor\(rate.sampleCount == 1 ? "" : "s") in \(match).\(caveat)"
+        )
+    }
+
+    private static func missingInputs(
+        app: AppStoreApp,
+        country: String,
+        placements: [ChartPlacement],
+        downloads: CalibratedEstimate?,
+        model: RevenueModel
+    ) -> String {
+        let place = Storefront.named(country).name
+        if model.anchors.isEmpty {
+            return "Apple doesn't publish earnings. Anchor one of your own apps below — with its real proceeds from the Earnings tab — and every app in the same charts becomes estimable."
+        }
+        if placements.isEmpty {
+            return "Check the Top Grossing charts to place this app against your anchors."
+        }
+        if model.rankedPoints(country: country, genreID: nil).isEmpty,
+           model.rankedPoints(country: country, genreID: app.primaryGenreId).isEmpty {
+            return "None of your anchors are ranked on a \(place) Top Grossing chart. Anchor an app that charts here, or switch to a storefront you have anchors in."
+        }
+        if downloads == nil || (downloads?.daily ?? 0) == 0 {
+            return "It isn't ranked on a chart your anchors cover, and there's no download estimate yet to fall back on."
+        }
+        return "Not enough overlap between this app and your anchors to produce a figure."
+    }
+}
+
+// MARK: - Formatting
+
+func formatUSD(_ value: Double, cents: Bool = false) -> String {
+    value.formatted(.currency(code: "USD").precision(.fractionLength(cents ? 2 : 0)))
+}
