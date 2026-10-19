@@ -39,18 +39,3 @@ struct AppHeader: View {
     }
 }
 
-struct AppIcon: View {
-    let url: URL?
-    let size: CGFloat
-
-    var body: some View {
-        AsyncImage(url: url) { image in
-            image.resizable().scaledToFit()
-        } placeholder: {
-            RoundedRectangle(cornerRadius: size * 0.22).fill(.quaternary)
-        }
-        .frame(width: size, height: size)
-        .clipShape(.rect(cornerRadius: size * 0.22))
-    }
-}
-

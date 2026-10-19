@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// Today's exchange rates, shared by every screen that has to total money in USD.
+/// Today's exchange rates, for pricing paid apps in USD.
 @Observable
 @MainActor
 final class CurrencyConverter {
@@ -26,16 +26,5 @@ final class CurrencyConverter {
         if code == "USD" || amount == 0 { return amount }
         guard let rate = rates?[code], rate > 0 else { return nil }
         return amount / rate
-    }
-
-    /// Sums a per-currency dictionary. Nil if any non-zero amount can't be converted — a
-    /// total that silently drops a currency would be wrong in a way nobody would notice.
-    func toUSD(_ amounts: [String: Double]) -> Double? {
-        var total = 0.0
-        for (currency, amount) in amounts where amount != 0 {
-            guard let converted = toUSD(amount, currency: currency) else { return nil }
-            total += converted
-        }
-        return total
     }
 }

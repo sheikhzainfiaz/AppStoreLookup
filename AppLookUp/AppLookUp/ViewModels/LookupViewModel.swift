@@ -52,7 +52,6 @@ final class LookupViewModel {
     private let calibrationStore: DownloadCalibrationStore
     private let revenueStore: RevenueAnchorStore
     private let currency: CurrencyConverter
-    private let earningsStore: EarningsStore
     private let historyStore: RatingHistoryStore
 
     convenience init() {
@@ -60,7 +59,6 @@ final class LookupViewModel {
             calibrationStore: .shared,
             revenueStore: .shared,
             currency: .shared,
-            earningsStore: .shared,
             historyStore: .shared
         )
     }
@@ -69,13 +67,11 @@ final class LookupViewModel {
         calibrationStore: DownloadCalibrationStore,
         revenueStore: RevenueAnchorStore,
         currency: CurrencyConverter,
-        earningsStore: EarningsStore,
         historyStore: RatingHistoryStore
     ) {
         self.calibrationStore = calibrationStore
         self.revenueStore = revenueStore
         self.currency = currency
-        self.earningsStore = earningsStore
         self.historyStore = historyStore
     }
 
@@ -309,12 +305,6 @@ final class LookupViewModel {
             store: revenueStore,
             currency: currency
         )
-    }
-
-    /// Real figures from App Store Connect, when the app on screen is one of yours.
-    var ownedActuals: OwnedAppActuals? {
-        guard let app else { return nil }
-        return earningsStore.actuals(for: app.trackId, country: country)
     }
 
     var revenueAnchors: [RevenueAnchor] { revenueStore.anchors }

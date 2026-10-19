@@ -78,27 +78,6 @@ enum AppStoreLookupService {
         return app
     }
 
-    /// One request for many apps. The lookup endpoint takes a comma-separated ID list, so the
-    /// Earnings tab can fetch names and icons for a whole portfolio in a single call.
-    static func lookupMany(_ ids: [Int], country: String = "us") async -> [Int: AppStoreApp] {
-        guard !ids.isEmpty else { return [:] }
-
-        var components = URLComponents(string: "https://itunes.apple.com/lookup")!
-        components.queryItems = [
-            URLQueryItem(name: "id", value: ids.map(String.init).joined(separator: ",")),
-            URLQueryItem(name: "country", value: country),
-            URLQueryItem(name: "entity", value: "software"),
-        ]
-
-        guard
-            let url = components.url,
-            let (data, _) = try? await URLSession.shared.data(from: url),
-            let envelope = try? decoder.decode(Envelope.self, from: data)
-        else { return [:] }
-
-        return Dictionary(envelope.results.map { ($0.trackId, $0) }, uniquingKeysWith: { first, _ in first })
-    }
-
     /// Sweeps every storefront so you can see where the app sells and where it's rated well.
     ///
     /// Apple throttles the lookup endpoint at roughly 20 requests a minute per IP, so this

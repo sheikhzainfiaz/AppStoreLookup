@@ -1,7 +1,7 @@
 import Observation
 
 enum RootTab: Hashable {
-    case lookup, availability, earnings
+    case lookup, availability
 }
 
 /// The root of the app: one view model per tab, plus the hand-offs between them.
@@ -13,12 +13,10 @@ final class AppViewModel {
 
     let lookup: LookupViewModel
     let availability: AvailabilityViewModel
-    let earnings: EarningsViewModel
 
     init() {
         lookup = LookupViewModel()
         availability = AvailabilityViewModel()
-        earnings = EarningsViewModel()
     }
 
     /// From a failed lookup: carry the query over and sweep every storefront.

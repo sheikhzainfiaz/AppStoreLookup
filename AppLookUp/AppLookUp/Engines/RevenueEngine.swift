@@ -6,8 +6,8 @@
 //
 //  The method mirrors the download calibration in DownloadCalibration.swift and EstimateEngine.swift:
 //
-//    1. ANCHOR. Your own app's real monthly proceeds in one storefront (from the Earnings tab,
-//       or typed in from App Store Connect), saved with its Top Grossing rank that day.
+//    1. ANCHOR. Your own app's real monthly proceeds in one storefront (typed in from App Store
+//       Connect), saved with its Top Grossing rank that day.
 //
 //    2. RANK. Grossing charts follow a power law just like download charts. Two anchors at
 //       different ranks fit the curve; one anchor plus the typical decay gives a wider band.
@@ -256,7 +256,7 @@ enum RevenueEngine {
     ) -> String {
         let place = Storefront.named(country).name
         if store.anchors.isEmpty {
-            return "Apple doesn't publish earnings. Anchor one of your own apps below — with its real proceeds from the Earnings tab — and every app in the same charts becomes estimable."
+            return "Apple doesn't publish earnings. Anchor one of your own apps below — with its real proceeds from App Store Connect — and every app in the same charts becomes estimable."
         }
         if placements.isEmpty {
             return "Check the Top Grossing charts to place this app against your anchors."

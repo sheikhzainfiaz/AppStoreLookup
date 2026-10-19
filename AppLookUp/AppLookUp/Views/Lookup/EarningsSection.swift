@@ -15,10 +15,6 @@ struct EarningsSection: View {
         VStack(alignment: .leading, spacing: 16) {
             SectionTitle("Monthly earnings")
 
-            if let actual = model.ownedActuals {
-                ActualBlock(actual: actual, country: model.country)
-            }
-
             EstimateBlock(model: model)
             GrossingLine(model: model)
 
@@ -30,7 +26,7 @@ struct EarningsSection: View {
                 RevenueAnchorList(model: model)
             }
 
-            Text("Earnings are developer proceeds — what's left after Apple's commission — in US dollars. Estimates cover this storefront only; actuals from App Store Connect are shown worldwide and for this storefront.")
+            Text("Earnings are developer proceeds — what's left after Apple's commission — in US dollars. Estimates cover this storefront only.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -41,45 +37,6 @@ struct EarningsSection: View {
         .task {
             await model.loadExchangeRatesIfNeeded()
         }
-    }
-}
-
-// MARK: - Actual
-
-private struct ActualBlock: View {
-
-    let actual: OwnedAppActuals
-    let country: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Actual · App Store Connect", systemImage: "checkmark.seal.fill")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.green)
-
-            if let worldwide = actual.worldwideUSD {
-                Text("\(formatUSD(worldwide)) in \(actual.month.longLabel)")
-                    .font(.system(size: 30, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-            } else {
-                Text("Loaded, but exchange rates are unavailable to total it in USD.")
-                    .font(.subheadline)
-            }
-
-            HStack(spacing: 6) {
-                Text("Worldwide · \(Int(actual.worldwideDownloads).formatted()) downloads")
-                if let local = actual.countryUSD {
-                    Text("·").foregroundStyle(.tertiary)
-                    Text("\(Storefront.named(country).flag) \(formatUSD(local))")
-                }
-            }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .monospacedDigit()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(Color.green.opacity(0.08), in: .rect(cornerRadius: 12))
     }
 }
 
@@ -239,28 +196,16 @@ private struct OwnerAnchorForm: View {
             Label("This is my app — anchor it", systemImage: "scope")
                 .font(.subheadline.weight(.medium))
         }
-        .onAppear(perform: prefill)
-        .onChange(of: model.app?.trackId) { prefill() }
-        .onChange(of: model.country) { prefill() }
+        .onChange(of: model.app?.trackId) { resetFields() }
+        .onChange(of: model.country) { resetFields() }
         .onChange(of: proceedsField) { saved = false }
     }
 
-    /// When App Store Connect is connected and this is one of your apps, the real figures
-    /// for this storefront are already known — no retyping.
-    private func prefill() {
+    /// Figures typed for one app or storefront never carry over to the next.
+    private func resetFields() {
         saved = false
-        guard let actual = model.ownedActuals else {
-            proceedsField = ""
-            downloadsField = ""
-            return
-        }
-        if let local = actual.countryUSD, local > 0 {
-            proceedsField = String(format: "%.0f", local)
-        }
-        if actual.countryDownloads > 0 {
-            downloadsField = String(format: "%.0f", actual.countryDownloads)
-        }
-        expanded = true
+        proceedsField = ""
+        downloadsField = ""
     }
 
     private func field(_ prompt: String, text: Binding<String>) -> some View {

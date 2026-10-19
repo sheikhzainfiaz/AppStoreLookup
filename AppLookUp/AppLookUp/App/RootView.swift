@@ -12,9 +12,6 @@ struct RootView: View {
             Tab("Availability", systemImage: "globe", value: RootTab.availability) {
                 AvailabilityScreen(model: model.availability, onOpenReport: model.openReport)
             }
-            Tab("Earnings", systemImage: "chart.bar.xaxis", value: RootTab.earnings) {
-                EarningsScreen(model: model.earnings, onOpenReport: model.openReport)
-            }
         }
     }
 }
