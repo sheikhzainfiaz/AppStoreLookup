@@ -35,7 +35,7 @@ struct CalibrationSheet: View {
 
                     if model.hasCalibrationData {
                         Button("Clear all calibration data", role: .destructive) {
-                            model.clearCalibration()
+                            model.clearCalibration( )
                         }
                         .font(.footnote)
                     }
